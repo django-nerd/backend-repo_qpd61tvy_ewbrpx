@@ -1,21 +1,15 @@
 INFO:     Will watch for changes in these directories: ['/home/workspace']
 INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
-INFO:     Started reloader process [1393] using StatReload
-INFO:     Started server process [1395]
+INFO:     Started reloader process [1469] using StatReload
+INFO:     Started server process [1471]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
-INFO:     172.20.0.1:57720 - "HEAD / HTTP/1.1" 405 Method Not Allowed
-INFO:     172.20.0.1:54646 - "GET /api/stream HTTP/1.1" 200 OK
-INFO:     172.20.0.1:54618 - "GET /api/top-posts HTTP/1.1" 200 OK
-INFO:     172.20.0.1:54618 - "GET /api/top-posts HTTP/1.1" 200 OK
-INFO:     172.20.0.1:54652 - "GET /api/accounts HTTP/1.1" 200 OK
-INFO:     172.20.0.1:54652 - "GET /api/accounts HTTP/1.1" 200 OK
-INFO:     172.20.0.1:54630 - "GET /api/posts HTTP/1.1" 200 OK
-INFO:     172.20.0.1:54630 - "GET /api/posts HTTP/1.1" 200 OK
-INFO:     172.20.0.1:54664 - "GET /api/top-posts HTTP/1.1" 200 OK
-INFO:     172.20.0.1:59012 - "GET /api/stream HTTP/1.1" 200 OK
-INFO:     172.20.0.1:54664 - "GET /api/posts HTTP/1.1" 200 OK
-INFO:     172.20.0.1:59018 - "GET /api/accounts HTTP/1.1" 200 OK
-INFO:     172.20.0.1:59034 - "GET /api/top-posts HTTP/1.1" 200 OK
-INFO:     172.20.0.1:54664 - "GET /api/posts HTTP/1.1" 200 OK
-INFO:     172.20.0.1:59018 - "GET /api/accounts HTTP/1.1" 200 OK
+INFO:     172.20.0.1:35424 - "GET /api/stream HTTP/1.1" 200 OK
+INFO:     172.20.0.1:35422 - "GET /api/accounts HTTP/1.1" 200 OK
+INFO:     172.20.0.1:35396 - "GET /api/top-posts HTTP/1.1" 200 OK
+INFO:     172.20.0.1:35438 - "HEAD / HTTP/1.1" 405 Method Not Allowed
+INFO:     172.20.0.1:35408 - "GET /api/posts HTTP/1.1" 200 OK
+INFO:     172.20.0.1:35436 - "GET /api/top-posts HTTP/1.1" 200 OK
+INFO:     172.20.0.1:43998 - "GET /api/stream HTTP/1.1" 200 OK
+INFO:     172.20.0.1:35436 - "GET /api/posts HTTP/1.1" 200 OK
+INFO:     172.20.0.1:43988 - "GET /api/accounts HTTP/1.1" 200 OK
