@@ -1,13 +1,16 @@
 import os
-from typing import List, Optional, Literal, Dict, Any
-from fastapi import FastAPI, HTTPException
+from typing import List, Optional, Literal, Dict, Any, AsyncIterator
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from datetime import datetime, timezone
 import math
 import requests
+import asyncio
+import json
+from starlette.responses import StreamingResponse
 
-app = FastAPI(title="Ads Studio API", version="1.6.0")
+app = FastAPI(title="Ads Studio API", version="1.7.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -195,6 +198,48 @@ class TopPost(BaseModel):
 # ====== Database helpers ======
 from database import db, create_document, get_documents, get_document_by_id, update_document  # type: ignore
 
+# ====== Realtime (SSE) ======
+_listeners: List[asyncio.Queue] = []
+
+async def _notify(event: Dict[str, Any]) -> None:
+    # push to all queues, drop if queue is closed
+    dead: List[asyncio.Queue] = []
+    for q in list(_listeners):
+        try:
+            await q.put(event)
+        except Exception:
+            dead.append(q)
+    for q in dead:
+        try:
+            _listeners.remove(q)
+        except ValueError:
+            pass
+
+async def _event_generator(request: Request) -> AsyncIterator[bytes]:
+    q: asyncio.Queue = asyncio.Queue()
+    _listeners.append(q)
+    try:
+        # Initial hello
+        yield f"event: ping\ndata: {json.dumps({'type':'hello','ts': datetime.now(timezone.utc).isoformat()})}\n\n".encode()
+        while True:
+            # Client disconnect handling
+            if await request.is_disconnected():
+                break
+            try:
+                evt = await asyncio.wait_for(q.get(), timeout=15)
+                payload = json.dumps(evt)
+                yield f"event: message\ndata: {payload}\n\n".encode()
+            except asyncio.TimeoutError:
+                # heartbeat
+                yield f"event: ping\ndata: {json.dumps({'type':'ping','ts': datetime.now(timezone.utc).isoformat()})}\n\n".encode()
+    finally:
+        if q in _listeners:
+            _listeners.remove(q)
+
+@app.get("/api/stream")
+async def stream(request: Request):
+    return StreamingResponse(_event_generator(request), media_type="text/event-stream")
+
 # ====== Routes ======
 @app.get("/")
 def read_root():
@@ -256,7 +301,9 @@ def create_campaign(payload: CampaignCreate):
         "created_at": now,
     }
     try:
-        create_document("toppost", top_data)
+        top_id = create_document("toppost", top_data)
+        # Notify realtime listeners
+        asyncio.create_task(_notify({"type": "toppost_created", "id": top_id, "campaign_id": new_id}))
     except Exception:
         pass
 
@@ -543,6 +590,8 @@ def add_post_comment(post_id: str, body: CommentCreate):
     now = datetime.now(timezone.utc)
     data = {"post_id": post_id, "text": body.text, "author": body.author, "attachment_url": body.attachment_url, "created_at": now, "updated_at": now}
     comment_id = create_document("comment", data)
+    # Notify
+    asyncio.create_task(_notify({"type": "comment_created", "post_id": post_id, "id": comment_id}))
     return Comment(id=comment_id, post_id=post_id, text=body.text, author=body.author, attachment_url=body.attachment_url, created_at=now, updated_at=now)
 
 class CommentUpdate(BaseModel):
@@ -562,6 +611,7 @@ def edit_post_comment(post_id: str, comment_id: str, body: CommentUpdate):
     changes["updated_at"] = datetime.now(timezone.utc)
     update_document("comment", comment_id, changes)
     updated = get_document_by_id("comment", comment_id)
+    asyncio.create_task(_notify({"type": "comment_updated", "post_id": post_id, "id": comment_id}))
     return Comment(
         id=str(updated.get("_id")),
         post_id=updated.get("post_id"),
@@ -581,6 +631,7 @@ def delete_post_comment(post_id: str, comment_id: str):
     if not doc or doc.get("post_id") != post_id:
         raise HTTPException(status_code=404, detail="Comment not found")
     db["comment"].delete_one({"_id": ObjectId(comment_id)})
+    asyncio.create_task(_notify({"type": "comment_deleted", "post_id": post_id, "id": comment_id}))
     return {"status": "deleted"}
 
 # ===== Chat for Posts =====
@@ -607,6 +658,7 @@ def add_post_chat(post_id: str, body: ChatMessageCreate):
     now = datetime.now(timezone.utc)
     data = {"post_id": post_id, "message": body.message, "author": body.author, "attachment_url": body.attachment_url, "created_at": now, "updated_at": now}
     chat_id = create_document("chat", data)
+    asyncio.create_task(_notify({"type": "chat_created", "post_id": post_id, "id": chat_id}))
     return ChatMessage(id=chat_id, post_id=post_id, message=body.message, author=body.author, attachment_url=body.attachment_url, created_at=now, updated_at=now)
 
 class ChatUpdate(BaseModel):
@@ -626,6 +678,7 @@ def edit_post_chat(post_id: str, message_id: str, body: ChatUpdate):
     changes["updated_at"] = datetime.now(timezone.utc)
     update_document("chat", message_id, changes)
     updated = get_document_by_id("chat", message_id)
+    asyncio.create_task(_notify({"type": "chat_updated", "post_id": post_id, "id": message_id}))
     return ChatMessage(
         id=str(updated.get("_id")),
         post_id=updated.get("post_id"),
@@ -645,6 +698,7 @@ def delete_post_chat(post_id: str, message_id: str):
     if not doc or doc.get("post_id") != post_id:
         raise HTTPException(status_code=404, detail="Message not found")
     db["chat"].delete_one({"_id": ObjectId(message_id)})
+    asyncio.create_task(_notify({"type": "chat_deleted", "post_id": post_id, "id": message_id}))
     return {"status": "deleted"}
 
 # ===== Top Posts (aggregated page visible to all social accounts) =====
