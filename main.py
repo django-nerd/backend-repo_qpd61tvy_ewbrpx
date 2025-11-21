@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 from datetime import datetime, timezone
 import requests
 
-app = FastAPI(title="Ads Studio API", version="1.2.0")
+app = FastAPI(title="Ads Studio API", version="1.3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -100,6 +100,17 @@ class AIGenerateResponse(BaseModel):
     brand: Optional[str]
     variations: List[AIVariation]
 
+# ====== AI Image Generation ======
+class AIImageRequest(BaseModel):
+    prompt: str = Field(..., description="Describe the image you want")
+    style: Optional[Literal["photo", "3d", "illustration", "neon", "minimal"]] = "photo"
+    width: Optional[int] = Field(1024, ge=256, le=2048)
+    height: Optional[int] = Field(1024, ge=256, le=2048)
+
+class AIImageResponse(BaseModel):
+    image_url: str
+    provider: str = "pollinations"
+
 # ====== Post creation (simple social posts separate from campaigns) ======
 class PostCreate(BaseModel):
     platform: Literal["facebook", "instagram", "twitter", "linkedin", "tiktok"]
@@ -108,8 +119,13 @@ class PostCreate(BaseModel):
     hashtags: Optional[List[str]] = []
     scheduled_at: Optional[datetime] = None
 
-class Post(PostCreate):
+class Post(BaseModel):
     id: str
+    platform: Literal["facebook", "instagram", "twitter", "linkedin", "tiktok"]
+    content: str
+    media_url: Optional[str] = None
+    hashtags: Optional[List[str]] = []
+    scheduled_at: Optional[datetime] = None
     status: Literal["draft", "scheduled", "queued", "published", "failed"] = "draft"
     created_at: datetime
     updated_at: datetime
@@ -293,7 +309,7 @@ def meta_oauth_callback(body: MetaCallbackRequest):
         raise HTTPException(status_code=500, detail="Meta app env vars not configured")
 
     # Exchange code for user access token
-    token_url = "https://graph.facebook.com/v18.0/oauth/access_token"
+    token_url = "https://graph.facebook.com/v18.0/oauth_access_token"
     params = {
         "client_id": app_id,
         "client_secret": app_secret,
@@ -354,7 +370,7 @@ def ai_generate(body: AIGenerateRequest):
     hashtags = _gen_hashtags(body.keywords or [], body.platform)
 
     base_text = (
-        f"{tone_prefix[0]} {brand}{body.brief.strip()} {emoji}\n\n" 
+        f"{tone_prefix[0]} {brand}{body.brief.strip()} {emoji}\n\n"
         f"{tone_prefix[1]} {cta}."
     )
 
@@ -377,6 +393,27 @@ def ai_generate(body: AIGenerateRequest):
     ]
 
     return AIGenerateResponse(platform=body.platform, tone=body.tone, brand=body.brand, variations=variations)
+
+# ===================== AI Image Generation Route =====================
+@app.post("/api/ai/image", response_model=AIImageResponse)
+def ai_image(body: AIImageRequest):
+    # Use Pollinations (no key) as a placeholder provider for this demo
+    # Build a prompt string with style hints
+    style_hint = {
+        "photo": "high quality photo",
+        "3d": "3d render",
+        "illustration": "flat illustration",
+        "neon": "neon cyberpunk",
+        "minimal": "minimal clean",
+    }.get(body.style or "photo", "high quality photo")
+
+    prompt = f"{style_hint}, {body.prompt.strip()}"
+    from urllib.parse import quote
+    pw = max(256, min(2048, body.width or 1024))
+    ph = max(256, min(2048, body.height or 1024))
+    url = f"https://image.pollinations.ai/prompt/{quote(prompt)}?width={pw}&height={ph}&n=1"
+    # Return the direct URL; client can set as campaign media_url
+    return AIImageResponse(image_url=url)
 
 # ===================== Simple Posts =====================
 @app.get("/api/posts")
