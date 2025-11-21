@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 from datetime import datetime, timezone
 import requests
 
-app = FastAPI(title="Ads Studio API", version="1.1.0")
+app = FastAPI(title="Ads Studio API", version="1.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -77,6 +77,40 @@ class AccountTokenCreate(BaseModel):
 
 class AccountToken(AccountTokenCreate):
     id: str
+    created_at: datetime
+    updated_at: datetime
+
+# ====== AI Content Writing ======
+class AIGenerateRequest(BaseModel):
+    brief: str = Field(..., description="Describe the product/offer and any key points")
+    platform: Literal["facebook", "instagram", "twitter", "linkedin", "tiktok"] = "facebook"
+    tone: Literal["friendly", "professional", "playful", "urgent", "inspirational"] = "friendly"
+    brand: Optional[str] = None
+    call_to_action: Optional[str] = None
+    keywords: Optional[List[str]] = []
+
+class AIVariation(BaseModel):
+    headline: str
+    primary_text: str
+    hashtags: List[str] = []
+
+class AIGenerateResponse(BaseModel):
+    platform: str
+    tone: str
+    brand: Optional[str]
+    variations: List[AIVariation]
+
+# ====== Post creation (simple social posts separate from campaigns) ======
+class PostCreate(BaseModel):
+    platform: Literal["facebook", "instagram", "twitter", "linkedin", "tiktok"]
+    content: str
+    media_url: Optional[str] = None
+    hashtags: Optional[List[str]] = []
+    scheduled_at: Optional[datetime] = None
+
+class Post(PostCreate):
+    id: str
+    status: Literal["draft", "scheduled", "queued", "published", "failed"] = "draft"
     created_at: datetime
     updated_at: datetime
 
@@ -274,6 +308,106 @@ def meta_oauth_callback(body: MetaCallbackRequest):
 
     # Example: return token. In production, fetch pages and store page tokens via /me/accounts
     return {"user_access_token": user_access_token}
+
+# ===================== AI Content Generation =====================
+
+def _gen_hashtags(keywords: List[str], platform: str) -> List[str]:
+    base = [k.replace(" ", "") for k in (keywords or [])][:5]
+    if platform in ("instagram", "tiktok"):
+        base = [f"#{b}" for b in base]
+    else:
+        base = [f"#{b}" for b in base[:3]]
+    # add generic
+    generic = ["#NexusAds", "#AdTips", "#Marketing"]
+    out = base + generic
+    # ensure uniqueness and max 8
+    seen = set()
+    uniq = []
+    for h in out:
+        if h.lower() not in seen:
+            uniq.append(h)
+            seen.add(h.lower())
+        if len(uniq) >= 8:
+            break
+    return uniq
+
+@app.post("/api/ai/generate", response_model=AIGenerateResponse)
+def ai_generate(body: AIGenerateRequest):
+    tone_prefix = {
+        "friendly": ["Hey there!", "Great news ✨"],
+        "professional": ["Introducing", "We are pleased to announce"],
+        "playful": ["Psst…", "Ready to level up?"],
+        "urgent": ["Limited time!", "Don’t miss out"],
+        "inspirational": ["Imagine this", "Turn your vision into reality"],
+    }[body.tone]
+
+    emoji = {
+        "facebook": "📣",
+        "instagram": "✨",
+        "twitter": "🚀",
+        "linkedin": "💼",
+        "tiktok": "🔥",
+    }[body.platform]
+
+    brand = f"{body.brand} — " if body.brand else ""
+    cta = body.call_to_action or "Learn more"
+    hashtags = _gen_hashtags(body.keywords or [], body.platform)
+
+    base_text = (
+        f"{tone_prefix[0]} {brand}{body.brief.strip()} {emoji}\n\n" 
+        f"{tone_prefix[1]} {cta}."
+    )
+
+    variations = [
+        AIVariation(
+            headline=f"{emoji} {brand} {cta}",
+            primary_text=base_text,
+            hashtags=hashtags,
+        ),
+        AIVariation(
+            headline=f"{emoji} {brand} {body.brief[:60]}…",
+            primary_text=f"{tone_prefix[1]} {body.brief.strip()} — {cta}!",
+            hashtags=hashtags,
+        ),
+        AIVariation(
+            headline=f"{emoji} {brand} New: {cta}",
+            primary_text=f"{tone_prefix[0]} {body.brief.strip()}\n\n{cta} today.",
+            hashtags=hashtags,
+        ),
+    ]
+
+    return AIGenerateResponse(platform=body.platform, tone=body.tone, brand=body.brand, variations=variations)
+
+# ===================== Simple Posts =====================
+@app.get("/api/posts")
+def list_posts(limit: int = 20):
+    docs = get_documents("post", {}, limit)
+    items = []
+    for d in docs:
+        items.append(
+            {
+                "id": str(d.get("_id")),
+                "platform": d.get("platform"),
+                "content": d.get("content"),
+                "media_url": d.get("media_url"),
+                "hashtags": d.get("hashtags", []),
+                "scheduled_at": d.get("scheduled_at"),
+                "status": d.get("status", "draft"),
+                "created_at": d.get("created_at"),
+                "updated_at": d.get("updated_at"),
+            }
+        )
+    return {"items": items}
+
+@app.post("/api/posts", response_model=Post)
+def create_post(body: PostCreate):
+    data = body.model_dump()
+    now = datetime.now(timezone.utc)
+    data["created_at"] = now
+    data["updated_at"] = now
+    data["status"] = "scheduled" if body.scheduled_at else "queued"
+    new_id = create_document("post", data)
+    return Post(id=new_id, created_at=now, updated_at=now, status=data["status"], **body.model_dump())
 
 # ===================== Publish =====================
 @app.post("/api/publish", response_model=PublishResponse)
