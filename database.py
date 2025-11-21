@@ -9,7 +9,7 @@ from pymongo import MongoClient
 from datetime import datetime, timezone
 import os
 from dotenv import load_dotenv
-from typing import Union
+from typing import Union, Optional, Dict, Any
 from pydantic import BaseModel
 
 # Load environment variables from .env file
@@ -53,3 +53,31 @@ def get_documents(collection_name: str, filter_dict: dict = None, limit: int = N
         cursor = cursor.limit(limit)
     
     return list(cursor)
+
+# New helpers
+def get_document_by_id(collection_name: str, doc_id: str) -> Optional[Dict[str, Any]]:
+    if db is None:
+        raise Exception("Database not available. Check DATABASE_URL and DATABASE_NAME environment variables.")
+    from bson import ObjectId
+    try:
+        return db[collection_name].find_one({"_id": ObjectId(doc_id)})
+    except Exception:
+        return None
+
+
+def update_document(collection_name: str, doc_id: str, updates: dict) -> bool:
+    if db is None:
+        raise Exception("Database not available. Check DATABASE_URL and DATABASE_NAME environment variables.")
+    from bson import ObjectId
+    updates = updates.copy()
+    updates['updated_at'] = datetime.now(timezone.utc)
+    res = db[collection_name].update_one({"_id": ObjectId(doc_id)}, {"$set": updates})
+    return res.modified_count > 0
+
+
+def delete_document(collection_name: str, doc_id: str) -> bool:
+    if db is None:
+        raise Exception("Database not available. Check DATABASE_URL and DATABASE_NAME environment variables.")
+    from bson import ObjectId
+    res = db[collection_name].delete_one({"_id": ObjectId(doc_id)})
+    return res.deleted_count > 0

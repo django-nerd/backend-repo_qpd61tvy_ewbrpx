@@ -4,8 +4,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from datetime import datetime, timezone
+import requests
 
-app = FastAPI(title="Ads Studio API", version="1.0.0")
+app = FastAPI(title="Ads Studio API", version="1.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -65,8 +66,22 @@ class PublishResponse(BaseModel):
     results: List[PublishResult]
     summary: str
 
+# Social token/account schemas
+class AccountTokenCreate(BaseModel):
+    platform: Literal["facebook", "instagram", "whatsapp", "twitter", "linkedin", "tiktok"]
+    page_id: Optional[str] = None
+    page_name: Optional[str] = None
+    access_token: str
+    expires_at: Optional[datetime] = None
+    owner_id: Optional[str] = None  # your app's user id if available
+
+class AccountToken(AccountTokenCreate):
+    id: str
+    created_at: datetime
+    updated_at: datetime
+
 # ====== Database helpers ======
-from database import db, create_document, get_documents  # type: ignore
+from database import db, create_document, get_documents, get_document_by_id  # type: ignore
 
 # ====== Routes ======
 @app.get("/")
@@ -110,6 +125,7 @@ def test_database():
 
     return response
 
+# ===================== Campaigns =====================
 @app.post("/api/campaigns", response_model=Campaign)
 def create_campaign(payload: CampaignCreate):
     data = payload.model_dump()
@@ -156,6 +172,110 @@ def list_campaigns(limit: int = 20):
         )
     return {"items": items}
 
+# ===================== Accounts/Tokens =====================
+@app.get("/api/accounts", response_model=List[AccountToken])
+def list_accounts():
+    docs = get_documents("token", {})
+    items: List[AccountToken] = []
+    for d in docs:
+        items.append(
+            AccountToken(
+                id=str(d.get("_id")),
+                platform=d.get("platform"),
+                page_id=d.get("page_id"),
+                page_name=d.get("page_name"),
+                access_token=d.get("access_token"),
+                expires_at=d.get("expires_at"),
+                owner_id=d.get("owner_id"),
+                created_at=d.get("created_at"),
+                updated_at=d.get("updated_at"),
+            )
+        )
+    return items
+
+@app.post("/api/accounts", response_model=AccountToken)
+def upsert_account(body: AccountTokenCreate):
+    # naive upsert by platform+page_id or page_name
+    from bson import ObjectId
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not available")
+    key_filter = {"platform": body.platform}
+    if body.page_id:
+        key_filter["page_id"] = body.page_id
+    elif body.page_name:
+        key_filter["page_name"] = body.page_name
+    existing = db["token"].find_one(key_filter)
+
+    data = body.model_dump()
+    data["updated_at"] = datetime.now(timezone.utc)
+    if existing:
+        db["token"].update_one({"_id": existing["_id"]}, {"$set": data})
+        saved = db["token"].find_one({"_id": existing["_id"]})
+        _id = str(existing["_id"])
+        created_at = existing.get("created_at")
+    else:
+        data["created_at"] = datetime.now(timezone.utc)
+        _id = create_document("token", data)
+        saved = db["token"].find_one({"_id": ObjectId(_id)})
+        created_at = saved.get("created_at") if saved else datetime.now(timezone.utc)
+
+    return AccountToken(id=_id, created_at=created_at, updated_at=data["updated_at"], **body.model_dump())
+
+@app.delete("/api/accounts/{token_id}")
+def delete_account(token_id: str):
+    from bson import ObjectId
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not available")
+    res = db["token"].delete_one({"_id": ObjectId(token_id)})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Not found")
+    return {"status": "deleted"}
+
+# ===================== OAuth (Meta / WhatsApp scaffolding) =====================
+@app.get("/auth/meta/url")
+def get_meta_oauth_url(state: Optional[str] = None):
+    app_id = os.getenv("META_APP_ID")
+    redirect_uri = os.getenv("META_REDIRECT_URI")
+    if not app_id or not redirect_uri:
+        raise HTTPException(status_code=500, detail="META_APP_ID or META_REDIRECT_URI not configured")
+    scope = "pages_manage_metadata,pages_read_engagement,pages_manage_posts,instagram_basic,instagram_content_publish,whatsapp_business_messaging,whatsapp_business_management"
+    s = state or "state"
+    url = (
+        "https://www.facebook.com/v18.0/dialog/oauth"
+        f"?client_id={app_id}&redirect_uri={redirect_uri}&state={s}&scope={scope}"
+    )
+    return {"url": url}
+
+class MetaCallbackRequest(BaseModel):
+    code: str
+    state: Optional[str] = None
+
+@app.post("/auth/meta/callback")
+def meta_oauth_callback(body: MetaCallbackRequest):
+    app_id = os.getenv("META_APP_ID")
+    app_secret = os.getenv("META_APP_SECRET")
+    redirect_uri = os.getenv("META_REDIRECT_URI")
+    if not app_id or not app_secret or not redirect_uri:
+        raise HTTPException(status_code=500, detail="Meta app env vars not configured")
+
+    # Exchange code for user access token
+    token_url = "https://graph.facebook.com/v18.0/oauth/access_token"
+    params = {
+        "client_id": app_id,
+        "client_secret": app_secret,
+        "redirect_uri": redirect_uri,
+        "code": body.code,
+    }
+    r = requests.get(token_url, params=params, timeout=20)
+    if r.status_code != 200:
+        raise HTTPException(status_code=400, detail=f"Token exchange failed: {r.text}")
+    token_payload = r.json()
+    user_access_token = token_payload.get("access_token")
+
+    # Example: return token. In production, fetch pages and store page tokens via /me/accounts
+    return {"user_access_token": user_access_token}
+
+# ===================== Publish =====================
 @app.post("/api/publish", response_model=PublishResponse)
 def publish_campaign(body: PublishRequest):
     if not body.campaign and not body.campaign_id:
@@ -179,8 +299,26 @@ def publish_campaign(body: PublishRequest):
     # Enforce max 5 social media pages as requested
     accounts = accounts[:5]
 
+    # Try enrich accounts with saved tokens if not provided
+    if db is not None and accounts:
+        enriched = []
+        for acc in accounts:
+            if acc.access_token:
+                enriched.append(acc)
+                continue
+            # Try lookup by platform + page_name
+            q = {"platform": acc.platform}
+            if acc.page_name:
+                q["page_name"] = acc.page_name
+            doc = db["token"].find_one(q)
+            if doc:
+                enriched.append(SocialAccount(platform=acc.platform, page_name=doc.get("page_name"), access_token=doc.get("access_token")))
+            else:
+                enriched.append(acc)
+        accounts = enriched
+
     for acc in accounts:
-        # Simulate publish to each platform
+        # Simulate or call real APIs depending on platform
         if not acc.access_token:
             results.append(
                 PublishResult(
@@ -191,7 +329,7 @@ def publish_campaign(body: PublishRequest):
                 )
             )
             continue
-        # In a real integration, here we'd call the platform APIs.
+        # Placeholder for real integration calls
         results.append(
             PublishResult(
                 platform=acc.platform,
