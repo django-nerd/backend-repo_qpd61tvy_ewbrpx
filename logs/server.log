@@ -1,20 +1,21 @@
 INFO:     Will watch for changes in these directories: ['/home/workspace']
 INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
-INFO:     Started reloader process [1330] using StatReload
-INFO:     Started server process [1332]
+INFO:     Started reloader process [1393] using StatReload
+INFO:     Started server process [1395]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
-INFO:     172.20.0.1:41318 - "HEAD / HTTP/1.1" 405 Method Not Allowed
-INFO:     172.20.0.1:41360 - "GET /api/stream HTTP/1.1" 200 OK
-INFO:     172.20.0.1:41330 - "GET /api/posts HTTP/1.1" 200 OK
-INFO:     172.20.0.1:41344 - "GET /api/top-posts HTTP/1.1" 200 OK
-INFO:     172.20.0.1:41330 - "GET /api/top-posts HTTP/1.1" 200 OK
-INFO:     172.20.0.1:41344 - "GET /api/posts HTTP/1.1" 200 OK
-INFO:     172.20.0.1:41354 - "GET /api/accounts HTTP/1.1" 200 OK
-INFO:     172.20.0.1:41366 - "GET /api/top-posts HTTP/1.1" 200 OK
-INFO:     172.20.0.1:38696 - "GET /api/accounts HTTP/1.1" 200 OK
-INFO:     172.20.0.1:41366 - "GET /api/posts HTTP/1.1" 200 OK
-INFO:     172.20.0.1:38696 - "GET /api/stream HTTP/1.1" 200 OK
-INFO:     172.20.0.1:41366 - "GET /api/top-posts HTTP/1.1" 200 OK
-INFO:     172.20.0.1:38712 - "GET /api/accounts HTTP/1.1" 200 OK
-INFO:     172.20.0.1:38728 - "GET /api/posts HTTP/1.1" 200 OK
+INFO:     172.20.0.1:57720 - "HEAD / HTTP/1.1" 405 Method Not Allowed
+INFO:     172.20.0.1:54646 - "GET /api/stream HTTP/1.1" 200 OK
+INFO:     172.20.0.1:54618 - "GET /api/top-posts HTTP/1.1" 200 OK
+INFO:     172.20.0.1:54618 - "GET /api/top-posts HTTP/1.1" 200 OK
+INFO:     172.20.0.1:54652 - "GET /api/accounts HTTP/1.1" 200 OK
+INFO:     172.20.0.1:54652 - "GET /api/accounts HTTP/1.1" 200 OK
+INFO:     172.20.0.1:54630 - "GET /api/posts HTTP/1.1" 200 OK
+INFO:     172.20.0.1:54630 - "GET /api/posts HTTP/1.1" 200 OK
+INFO:     172.20.0.1:54664 - "GET /api/top-posts HTTP/1.1" 200 OK
+INFO:     172.20.0.1:59012 - "GET /api/stream HTTP/1.1" 200 OK
+INFO:     172.20.0.1:54664 - "GET /api/posts HTTP/1.1" 200 OK
+INFO:     172.20.0.1:59018 - "GET /api/accounts HTTP/1.1" 200 OK
+INFO:     172.20.0.1:59034 - "GET /api/top-posts HTTP/1.1" 200 OK
+INFO:     172.20.0.1:54664 - "GET /api/posts HTTP/1.1" 200 OK
+INFO:     172.20.0.1:59018 - "GET /api/accounts HTTP/1.1" 200 OK
