@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import math
 import requests
 
-app = FastAPI(title="Ads Studio API", version="1.4.0")
+app = FastAPI(title="Ads Studio API", version="1.5.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -78,8 +78,14 @@ class AccountTokenCreate(BaseModel):
     expires_at: Optional[datetime] = None
     owner_id: Optional[str] = None  # your app's user id if available
 
-class AccountToken(AccountTokenCreate):
+class AccountToken(BaseModel):
     id: str
+    platform: Literal["facebook", "instagram", "whatsapp", "twitter", "linkedin", "tiktok"]
+    page_id: Optional[str] = None
+    page_name: Optional[str] = None
+    access_token: str
+    expires_at: Optional[datetime] = None
+    owner_id: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
@@ -133,6 +139,29 @@ class Post(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+# ====== Comments & Chat ======
+class CommentCreate(BaseModel):
+    text: str
+    author: Optional[str] = None
+
+class Comment(BaseModel):
+    id: str
+    post_id: str
+    text: str
+    author: Optional[str] = None
+    created_at: datetime
+
+class ChatMessageCreate(BaseModel):
+    message: str
+    author: Optional[str] = None
+
+class ChatMessage(BaseModel):
+    id: str
+    post_id: str
+    message: str
+    author: Optional[str] = None
+    created_at: datetime
+
 # ====== Analytics/Insights ======
 class CampaignAnalytics(BaseModel):
     campaign_id: str
@@ -145,6 +174,17 @@ class CampaignAnalytics(BaseModel):
     risk_score: float
     suggestions: List[str]
     share_urls: Optional[Dict[str, str]] = None
+
+# ====== Top Post (for new campaigns) ======
+class TopPost(BaseModel):
+    id: str
+    campaign_id: str
+    title: str
+    summary: str
+    media_url: Optional[str] = None
+    destination_url: Optional[str] = None
+    platforms: List[str] = []
+    created_at: datetime
 
 # ====== Database helpers ======
 from database import db, create_document, get_documents, get_document_by_id, update_document  # type: ignore
@@ -198,6 +238,22 @@ def create_campaign(payload: CampaignCreate):
     data["status"] = "draft"
     new_id = create_document("campaign", data)
     now = datetime.now(timezone.utc)
+
+    # Create a Top Post entry visible to all social accounts (aggregated page)
+    top_data = {
+        "campaign_id": new_id,
+        "title": payload.headline or payload.name,
+        "summary": payload.primary_text[:240],
+        "media_url": payload.media_url,
+        "destination_url": payload.destination_url,
+        "platforms": payload.platforms,
+        "created_at": now,
+    }
+    try:
+        create_document("toppost", top_data)
+    except Exception:
+        pass
+
     return Campaign(id=new_id, created_at=now, updated_at=now, **payload.model_dump(), status="draft")
 
 @app.get("/api/campaigns")
@@ -263,7 +319,6 @@ def list_accounts():
 
 @app.post("/api/accounts", response_model=AccountToken)
 def upsert_account(body: AccountTokenCreate):
-    # naive upsert by platform+page_id or page_name
     from bson import ObjectId
     if db is None:
         raise HTTPException(status_code=500, detail="Database not available")
@@ -287,7 +342,7 @@ def upsert_account(body: AccountTokenCreate):
         saved = db["token"].find_one({"_id": ObjectId(_id)})
         created_at = saved.get("created_at") if saved else datetime.now(timezone.utc)
 
-    return AccountToken(id=_id, created_at=created_at, updated_at=data["updated_at"], **body.model_dump())
+    return AccountToken(id=_id, created_at=created_at, updated_at=data["updated_at"], platform=body.platform, page_id=body.page_id, page_name=body.page_name, access_token=body.access_token, expires_at=body.expires_at, owner_id=body.owner_id)
 
 @app.delete("/api/accounts/{token_id}")
 def delete_account(token_id: str):
@@ -340,7 +395,6 @@ def meta_oauth_callback(body: MetaCallbackRequest):
     token_payload = r.json()
     user_access_token = token_payload.get("access_token")
 
-    # Example: return token. In production, fetch pages and store page tokens via /me/accounts
     return {"user_access_token": user_access_token}
 
 # ===================== AI Content Generation =====================
@@ -351,10 +405,8 @@ def _gen_hashtags(keywords: List[str], platform: str) -> List[str]:
         base = [f"#{b}" for b in base]
     else:
         base = [f"#{b}" for b in base[:3]]
-    # add generic
     generic = ["#NexusAds", "#AdTips", "#Marketing"]
     out = base + generic
-    # ensure uniqueness and max 8
     seen = set()
     uniq = []
     for h in out:
@@ -415,8 +467,6 @@ def ai_generate(body: AIGenerateRequest):
 # ===================== AI Image Generation Route =====================
 @app.post("/api/ai/image", response_model=AIImageResponse)
 def ai_image(body: AIImageRequest):
-    # Use Pollinations (no key) as a placeholder provider for this demo
-    # Build a prompt string with style hints
     style_hint = {
         "photo": "high quality photo",
         "3d": "3d render",
@@ -430,7 +480,6 @@ def ai_image(body: AIImageRequest):
     pw = max(256, min(2048, body.width or 1024))
     ph = max(256, min(2048, body.height or 1024))
     url = f"https://image.pollinations.ai/prompt/{quote(prompt)}?width={pw}&height={ph}&n=1"
-    # Return the direct URL; client can set as campaign media_url
     return AIImageResponse(image_url=url)
 
 # ===================== Simple Posts =====================
@@ -464,6 +513,74 @@ def create_post(body: PostCreate):
     new_id = create_document("post", data)
     return Post(id=new_id, created_at=now, updated_at=now, status=data["status"], **body.model_dump())
 
+# ===== Comments for Posts =====
+@app.get("/api/posts/{post_id}/comments", response_model=List[Comment])
+def get_post_comments(post_id: str):
+    docs = get_documents("comment", {"post_id": post_id})
+    items: List[Comment] = []
+    for d in docs:
+        items.append(
+            Comment(
+                id=str(d.get("_id")),
+                post_id=d.get("post_id"),
+                text=d.get("text"),
+                author=d.get("author"),
+                created_at=d.get("created_at"),
+            )
+        )
+    return items
+
+@app.post("/api/posts/{post_id}/comments", response_model=Comment)
+def add_post_comment(post_id: str, body: CommentCreate):
+    now = datetime.now(timezone.utc)
+    data = {"post_id": post_id, "text": body.text, "author": body.author, "created_at": now, "updated_at": now}
+    comment_id = create_document("comment", data)
+    return Comment(id=comment_id, post_id=post_id, text=body.text, author=body.author, created_at=now)
+
+# ===== Chat for Posts =====
+@app.get("/api/posts/{post_id}/chat", response_model=List[ChatMessage])
+def get_post_chat(post_id: str):
+    docs = get_documents("chat", {"post_id": post_id})
+    items: List[ChatMessage] = []
+    for d in docs:
+        items.append(
+            ChatMessage(
+                id=str(d.get("_id")),
+                post_id=d.get("post_id"),
+                message=d.get("message"),
+                author=d.get("author"),
+                created_at=d.get("created_at"),
+            )
+        )
+    return items
+
+@app.post("/api/posts/{post_id}/chat", response_model=ChatMessage)
+def add_post_chat(post_id: str, body: ChatMessageCreate):
+    now = datetime.now(timezone.utc)
+    data = {"post_id": post_id, "message": body.message, "author": body.author, "created_at": now, "updated_at": now}
+    chat_id = create_document("chat", data)
+    return ChatMessage(id=chat_id, post_id=post_id, message=body.message, author=body.author, created_at=now)
+
+# ===== Top Posts (aggregated page visible to all social accounts) =====
+@app.get("/api/top-posts")
+def get_top_posts(limit: int = 20):
+    docs = get_documents("toppost", {}, limit)
+    items = []
+    for d in docs:
+        items.append(
+            {
+                "id": str(d.get("_id")),
+                "campaign_id": d.get("campaign_id"),
+                "title": d.get("title"),
+                "summary": d.get("summary"),
+                "media_url": d.get("media_url"),
+                "destination_url": d.get("destination_url"),
+                "platforms": d.get("platforms", []),
+                "created_at": d.get("created_at"),
+            }
+        )
+    return {"items": items}
+
 # ===================== Publish =====================
 @app.post("/api/publish", response_model=PublishResponse)
 def publish_campaign(body: PublishRequest):
@@ -474,28 +591,22 @@ def publish_campaign(body: PublishRequest):
     if body.campaign:
         campaign_payload = body.campaign
     else:
-        # fetch from db
         docs = get_documents("campaign", {})
         found = next((d for d in docs if str(d.get("_id")) == body.campaign_id), None)
         if not found:
             raise HTTPException(status_code=404, detail="Campaign not found")
-        # reconstruct model
         campaign_payload = CampaignCreate(**{k: found.get(k) for k in CampaignCreate.model_fields.keys()})
 
     results: List[PublishResult] = []
     accounts = (campaign_payload.social_accounts or [])
-
-    # Enforce max 5 social media pages as requested
     accounts = accounts[:5]
 
-    # Try enrich accounts with saved tokens if not provided
     if db is not None and accounts:
         enriched = []
         for acc in accounts:
             if acc.access_token:
                 enriched.append(acc)
                 continue
-            # Try lookup by platform + page_name
             q = {"platform": acc.platform}
             if acc.page_name:
                 q["page_name"] = acc.page_name
@@ -507,7 +618,6 @@ def publish_campaign(body: PublishRequest):
         accounts = enriched
 
     for acc in accounts:
-        # Simulate or call real APIs depending on platform
         if not acc.access_token:
             results.append(
                 PublishResult(
@@ -518,7 +628,6 @@ def publish_campaign(body: PublishRequest):
                 )
             )
             continue
-        # Placeholder for real integration calls
         results.append(
             PublishResult(
                 platform=acc.platform,
@@ -528,7 +637,6 @@ def publish_campaign(body: PublishRequest):
             )
         )
 
-    # Store a publish log
     log = {
         "type": "publish",
         "results": [r.model_dump() for r in results],
@@ -544,11 +652,9 @@ def publish_campaign(body: PublishRequest):
 # ===================== AI Analytics & Actions =====================
 
 def _calc_predictions(camp: Dict[str, Any]) -> Dict[str, Any]:
-    # simple heuristic model: scale with daily budget and duration
     daily = float(camp.get("daily_budget") or 0)
     days = int(camp.get("duration_days") or 7)
     total = float(camp.get("total_budget") or (daily * days))
-    # base multipliers
     reach = int(800 * daily * math.log(days + 1, 2) + 1000)
     clicks = int(reach * 0.02 + daily * 15)
     ctr = round((clicks / max(1, reach)) * 100, 2)
@@ -556,7 +662,6 @@ def _calc_predictions(camp: Dict[str, Any]) -> Dict[str, Any]:
     leads_low = int((total / max(0.01, cpl)) * 0.6)
     leads_high = int((total / max(0.01, cpl)) * 1.1)
 
-    # risk score based on audience settings
     interests = camp.get("audience_interests") or []
     age_min = int(camp.get("audience_age_min") or 18)
     age_max = int(camp.get("audience_age_max") or 45)
@@ -603,7 +708,6 @@ def campaign_analytics(campaign_id: str):
 def boost_campaign(campaign_id: str):
     if not get_document_by_id("campaign", campaign_id):
         raise HTTPException(status_code=404, detail="Campaign not found")
-    # increment a boost counter and log
     update_document("campaign", campaign_id, {"boosts": int(datetime.now().timestamp())})
     create_document("log", {"type": "boost", "campaign_id": campaign_id, "created_at": datetime.now(timezone.utc)})
     return {"status": "ok", "message": "Boost scheduled — budget concentration and frequency cap adjustments queued."}
