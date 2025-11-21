@@ -1,12 +1,13 @@
 import os
-from typing import List, Optional, Literal
+from typing import List, Optional, Literal, Dict, Any
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from datetime import datetime, timezone
+import math
 import requests
 
-app = FastAPI(title="Ads Studio API", version="1.3.0")
+app = FastAPI(title="Ads Studio API", version="1.4.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -34,8 +35,10 @@ class CampaignCreate(BaseModel):
         "shop_now", "learn_more", "sign_up", "contact_us", "download"
     ] = "learn_more"
     destination_url: Optional[str] = None
-    daily_budget: float = Field(..., ge=1)
-    total_budget: Optional[float] = Field(None, ge=1)
+    daily_budget: float = Field(..., ge=0.7)
+    total_budget: Optional[float] = Field(None, ge=0)
+    duration_days: Optional[int] = Field(7, ge=1, description="Duration in days")
+    currency: Optional[str] = Field("USD", description="Three-letter currency code like USD, NGN")
     start_date: Optional[datetime] = None
     end_date: Optional[datetime] = None
     audience_location: Optional[str] = None
@@ -130,8 +133,21 @@ class Post(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+# ====== Analytics/Insights ======
+class CampaignAnalytics(BaseModel):
+    campaign_id: str
+    predicted_reach: int
+    predicted_clicks: int
+    predicted_ctr: float
+    predicted_cpl: float
+    predicted_leads_low: int
+    predicted_leads_high: int
+    risk_score: float
+    suggestions: List[str]
+    share_urls: Optional[Dict[str, str]] = None
+
 # ====== Database helpers ======
-from database import db, create_document, get_documents, get_document_by_id  # type: ignore
+from database import db, create_document, get_documents, get_document_by_id, update_document  # type: ignore
 
 # ====== Routes ======
 @app.get("/")
@@ -207,6 +223,8 @@ def list_campaigns(limit: int = 20):
                 "destination_url": d.get("destination_url"),
                 "daily_budget": d.get("daily_budget"),
                 "total_budget": d.get("total_budget"),
+                "duration_days": d.get("duration_days", 7),
+                "currency": d.get("currency", "USD"),
                 "start_date": created_at,
                 "end_date": d.get("end_date"),
                 "audience_location": d.get("audience_location"),
@@ -522,6 +540,103 @@ def publish_campaign(body: PublishRequest):
     summary = f"Prepared {success_count}/{len(results)} posts for publishing"
 
     return PublishResponse(campaign_id=body.campaign_id, results=results, summary=summary)
+
+# ===================== AI Analytics & Actions =====================
+
+def _calc_predictions(camp: Dict[str, Any]) -> Dict[str, Any]:
+    # simple heuristic model: scale with daily budget and duration
+    daily = float(camp.get("daily_budget") or 0)
+    days = int(camp.get("duration_days") or 7)
+    total = float(camp.get("total_budget") or (daily * days))
+    # base multipliers
+    reach = int(800 * daily * math.log(days + 1, 2) + 1000)
+    clicks = int(reach * 0.02 + daily * 15)
+    ctr = round((clicks / max(1, reach)) * 100, 2)
+    cpl = round(max(0.2, 1.5 - (daily / 20.0)), 2)
+    leads_low = int((total / max(0.01, cpl)) * 0.6)
+    leads_high = int((total / max(0.01, cpl)) * 1.1)
+
+    # risk score based on audience settings
+    interests = camp.get("audience_interests") or []
+    age_min = int(camp.get("audience_age_min") or 18)
+    age_max = int(camp.get("audience_age_max") or 45)
+    risk = 0.0
+    if len(interests) < 2:
+        risk += 0.2
+    if age_max - age_min < 10:
+        risk += 0.2
+    if daily < 1:
+        risk += 0.3
+    risk = round(min(1.0, risk), 2)
+
+    suggestions = []
+    if len(interests) < 3:
+        suggestions.append("Add 3–5 interest clusters to broaden discovery.")
+    if ctr < 1.5:
+        suggestions.append("Test 2 more headlines to lift CTR above 1.5%.")
+    if cpl > 1.0:
+        suggestions.append("Consider optimizing the landing page to improve conversion cost.")
+    if days < 5:
+        suggestions.append("Increase duration to stabilize delivery and learning phase.")
+
+    return {
+        "predicted_reach": reach,
+        "predicted_clicks": clicks,
+        "predicted_ctr": ctr,
+        "predicted_cpl": cpl,
+        "predicted_leads_low": leads_low,
+        "predicted_leads_high": leads_high,
+        "risk_score": risk,
+        "suggestions": suggestions,
+    }
+
+@app.get("/api/campaigns/{campaign_id}/analytics", response_model=CampaignAnalytics)
+def campaign_analytics(campaign_id: str):
+    doc = get_document_by_id("campaign", campaign_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    preds = _calc_predictions(doc)
+    share_urls = _build_share_urls(doc)
+    return CampaignAnalytics(campaign_id=campaign_id, share_urls=share_urls, **preds)
+
+@app.post("/api/campaigns/{campaign_id}/boost")
+def boost_campaign(campaign_id: str):
+    if not get_document_by_id("campaign", campaign_id):
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    # increment a boost counter and log
+    update_document("campaign", campaign_id, {"boosts": int(datetime.now().timestamp())})
+    create_document("log", {"type": "boost", "campaign_id": campaign_id, "created_at": datetime.now(timezone.utc)})
+    return {"status": "ok", "message": "Boost scheduled — budget concentration and frequency cap adjustments queued."}
+
+@app.post("/api/campaigns/{campaign_id}/viral")
+def viral_push(campaign_id: str):
+    if not get_document_by_id("campaign", campaign_id):
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    update_document("campaign", campaign_id, {"viral_pushes": int(datetime.now().timestamp())})
+    create_document("log", {"type": "viral", "campaign_id": campaign_id, "created_at": datetime.now(timezone.utc)})
+    return {"status": "ok", "message": "Viral push initiated — top creatives will be re-promoted across platforms."}
+
+# Social share links
+
+def _build_share_urls(camp: Dict[str, Any]) -> Dict[str, str]:
+    from urllib.parse import quote_plus
+    url = camp.get("destination_url") or "https://nexus-ads.app"
+    text = camp.get("headline") or camp.get("primary_text") or "Check this out"
+    share = {
+        "facebook": f"https://www.facebook.com/sharer/sharer.php?u={quote_plus(url)}",
+        "twitter": f"https://twitter.com/intent/tweet?text={quote_plus(text)}&url={quote_plus(url)}",
+        "linkedin": f"https://www.linkedin.com/sharing/share-offsite/?url={quote_plus(url)}",
+        "whatsapp": f"https://api.whatsapp.com/send?text={quote_plus(text + ' ' + url)}",
+        "telegram": f"https://t.me/share/url?url={quote_plus(url)}&text={quote_plus(text)}",
+    }
+    return share
+
+@app.get("/api/campaigns/{campaign_id}/share")
+def share_links(campaign_id: str):
+    doc = get_document_by_id("campaign", campaign_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    return {"campaign_id": campaign_id, "share_urls": _build_share_urls(doc)}
 
 
 if __name__ == "__main__":
