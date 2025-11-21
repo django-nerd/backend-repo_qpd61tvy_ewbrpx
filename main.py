@@ -3,14 +3,14 @@ from typing import List, Optional, Literal, Dict, Any, AsyncIterator
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import math
 import requests
 import asyncio
 import json
 from starlette.responses import StreamingResponse
 
-app = FastAPI(title="Ads Studio API", version="1.7.0")
+app = FastAPI(title="Ads Studio API", version="1.8.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -171,6 +171,11 @@ class ChatMessage(BaseModel):
     created_at: datetime
     updated_at: Optional[datetime] = None
 
+class TypingEvent(BaseModel):
+    channel: Literal["comment", "chat"]
+    author: Optional[str] = None
+    is_typing: bool = True
+
 # ====== Analytics/Insights ======
 class CampaignAnalytics(BaseModel):
     campaign_id: str
@@ -202,7 +207,6 @@ from database import db, create_document, get_documents, get_document_by_id, upd
 _listeners: List[asyncio.Queue] = []
 
 async def _notify(event: Dict[str, Any]) -> None:
-    # push to all queues, drop if queue is closed
     dead: List[asyncio.Queue] = []
     for q in list(_listeners):
         try:
@@ -222,7 +226,6 @@ async def _event_generator(request: Request) -> AsyncIterator[bytes]:
         # Initial hello
         yield f"event: ping\ndata: {json.dumps({'type':'hello','ts': datetime.now(timezone.utc).isoformat()})}\n\n".encode()
         while True:
-            # Client disconnect handling
             if await request.is_disconnected():
                 break
             try:
@@ -230,7 +233,6 @@ async def _event_generator(request: Request) -> AsyncIterator[bytes]:
                 payload = json.dumps(evt)
                 yield f"event: message\ndata: {payload}\n\n".encode()
             except asyncio.TimeoutError:
-                # heartbeat
                 yield f"event: ping\ndata: {json.dumps({'type':'ping','ts': datetime.now(timezone.utc).isoformat()})}\n\n".encode()
     finally:
         if q in _listeners:
@@ -290,7 +292,6 @@ def create_campaign(payload: CampaignCreate):
     new_id = create_document("campaign", data)
     now = datetime.now(timezone.utc)
 
-    # Create a Top Post entry visible to all social accounts (aggregated page)
     top_data = {
         "campaign_id": new_id,
         "title": payload.headline or payload.name,
@@ -302,7 +303,6 @@ def create_campaign(payload: CampaignCreate):
     }
     try:
         top_id = create_document("toppost", top_data)
-        # Notify realtime listeners
         asyncio.create_task(_notify({"type": "toppost_created", "id": top_id, "campaign_id": new_id}))
     except Exception:
         pass
@@ -312,14 +312,12 @@ def create_campaign(payload: CampaignCreate):
 @app.get("/api/campaigns")
 def list_campaigns(limit: int = 20):
     docs = get_documents("campaign", {}, limit)
-    # Normalize ids and dates to strings
     items = []
     for d in docs:
         _id = str(d.get("_id"))
         created_at = d.get("created_at") or datetime.now(timezone.utc)
         updated_at = d.get("updated_at") or created_at
         status = d.get("status", "draft")
-        # map back to Campaign
         items.append(
             {
                 "id": _id,
@@ -434,7 +432,6 @@ def meta_oauth_callback(body: MetaCallbackRequest):
     if not app_id or not app_secret or not redirect_uri:
         raise HTTPException(status_code=500, detail="Meta app env vars not configured")
 
-    # Exchange code for user access token
     token_url = "https://graph.facebook.com/v18.0/oauth_access_token"
     params = {
         "client_id": app_id,
@@ -590,7 +587,6 @@ def add_post_comment(post_id: str, body: CommentCreate):
     now = datetime.now(timezone.utc)
     data = {"post_id": post_id, "text": body.text, "author": body.author, "attachment_url": body.attachment_url, "created_at": now, "updated_at": now}
     comment_id = create_document("comment", data)
-    # Notify
     asyncio.create_task(_notify({"type": "comment_created", "post_id": post_id, "id": comment_id}))
     return Comment(id=comment_id, post_id=post_id, text=body.text, author=body.author, attachment_url=body.attachment_url, created_at=now, updated_at=now)
 
@@ -700,6 +696,55 @@ def delete_post_chat(post_id: str, message_id: str):
     db["chat"].delete_one({"_id": ObjectId(message_id)})
     asyncio.create_task(_notify({"type": "chat_deleted", "post_id": post_id, "id": message_id}))
     return {"status": "deleted"}
+
+# ===== Typing indicator =====
+@app.post("/api/posts/{post_id}/typing")
+async def typing_event(post_id: str, body: TypingEvent):
+    # Broadcast typing event; clients display transient indicator
+    payload = {
+        "type": "typing",
+        "post_id": post_id,
+        "channel": body.channel,
+        "author": body.author or "Someone",
+        "is_typing": body.is_typing,
+        "expires_at": (datetime.now(timezone.utc) + timedelta(seconds=3)).isoformat(),
+    }
+    await _notify(payload)
+    return {"status": "ok"}
+
+# ===== Mentions autocomplete =====
+@app.get("/api/mentions")
+def mentions_search(q: Optional[str] = None, limit: int = 8):
+    term = (q or "").strip().lower()
+    suggestions: List[Dict[str, str]] = []
+    seen = set()
+    if db is not None:
+        # Collect distinct authors from comments and chat
+        try:
+            authors_c = db["comment"].distinct("author")
+            authors_m = db["chat"].distinct("author")
+            names = [a for a in (authors_c + authors_m) if isinstance(a, str) and a.strip()]
+        except Exception:
+            names = []
+        # Include connected page names as well
+        try:
+            pages = db["token"].distinct("page_name")
+            pages = [p for p in pages if isinstance(p, str) and p.strip()]
+        except Exception:
+            pages = []
+        for n in names + pages:
+            key = n.strip()
+            handle = "@" + "".join(ch for ch in key.replace(" ", "_") if ch.isalnum() or ch == "_")
+            item = {"name": key, "handle": handle}
+            if term and term not in key.lower() and term not in handle.lower():
+                continue
+            if handle.lower() in seen:
+                continue
+            seen.add(handle.lower())
+            suggestions.append(item)
+            if len(suggestions) >= limit:
+                break
+    return {"items": suggestions}
 
 # ===== Top Posts (aggregated page visible to all social accounts) =====
 @app.get("/api/top-posts")
