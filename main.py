@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import math
 import requests
 
-app = FastAPI(title="Ads Studio API", version="1.5.0")
+app = FastAPI(title="Ads Studio API", version="1.6.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -143,24 +143,30 @@ class Post(BaseModel):
 class CommentCreate(BaseModel):
     text: str
     author: Optional[str] = None
+    attachment_url: Optional[str] = None
 
 class Comment(BaseModel):
     id: str
     post_id: str
     text: str
     author: Optional[str] = None
+    attachment_url: Optional[str] = None
     created_at: datetime
+    updated_at: Optional[datetime] = None
 
 class ChatMessageCreate(BaseModel):
     message: str
     author: Optional[str] = None
+    attachment_url: Optional[str] = None
 
 class ChatMessage(BaseModel):
     id: str
     post_id: str
     message: str
     author: Optional[str] = None
+    attachment_url: Optional[str] = None
     created_at: datetime
+    updated_at: Optional[datetime] = None
 
 # ====== Analytics/Insights ======
 class CampaignAnalytics(BaseModel):
@@ -525,7 +531,9 @@ def get_post_comments(post_id: str):
                 post_id=d.get("post_id"),
                 text=d.get("text"),
                 author=d.get("author"),
+                attachment_url=d.get("attachment_url"),
                 created_at=d.get("created_at"),
+                updated_at=d.get("updated_at"),
             )
         )
     return items
@@ -533,9 +541,47 @@ def get_post_comments(post_id: str):
 @app.post("/api/posts/{post_id}/comments", response_model=Comment)
 def add_post_comment(post_id: str, body: CommentCreate):
     now = datetime.now(timezone.utc)
-    data = {"post_id": post_id, "text": body.text, "author": body.author, "created_at": now, "updated_at": now}
+    data = {"post_id": post_id, "text": body.text, "author": body.author, "attachment_url": body.attachment_url, "created_at": now, "updated_at": now}
     comment_id = create_document("comment", data)
-    return Comment(id=comment_id, post_id=post_id, text=body.text, author=body.author, created_at=now)
+    return Comment(id=comment_id, post_id=post_id, text=body.text, author=body.author, attachment_url=body.attachment_url, created_at=now, updated_at=now)
+
+class CommentUpdate(BaseModel):
+    text: Optional[str] = None
+    attachment_url: Optional[str] = None
+
+@app.patch("/api/posts/{post_id}/comments/{comment_id}", response_model=Comment)
+def edit_post_comment(post_id: str, comment_id: str, body: CommentUpdate):
+    doc = get_document_by_id("comment", comment_id)
+    if not doc or doc.get("post_id") != post_id:
+        raise HTTPException(status_code=404, detail="Comment not found")
+    changes: Dict[str, Any] = {}
+    if body.text is not None:
+        changes["text"] = body.text
+    if body.attachment_url is not None:
+        changes["attachment_url"] = body.attachment_url
+    changes["updated_at"] = datetime.now(timezone.utc)
+    update_document("comment", comment_id, changes)
+    updated = get_document_by_id("comment", comment_id)
+    return Comment(
+        id=str(updated.get("_id")),
+        post_id=updated.get("post_id"),
+        text=updated.get("text"),
+        author=updated.get("author"),
+        attachment_url=updated.get("attachment_url"),
+        created_at=updated.get("created_at"),
+        updated_at=updated.get("updated_at"),
+    )
+
+@app.delete("/api/posts/{post_id}/comments/{comment_id}")
+def delete_post_comment(post_id: str, comment_id: str):
+    from bson import ObjectId
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not available")
+    doc = db["comment"].find_one({"_id": ObjectId(comment_id)})
+    if not doc or doc.get("post_id") != post_id:
+        raise HTTPException(status_code=404, detail="Comment not found")
+    db["comment"].delete_one({"_id": ObjectId(comment_id)})
+    return {"status": "deleted"}
 
 # ===== Chat for Posts =====
 @app.get("/api/posts/{post_id}/chat", response_model=List[ChatMessage])
@@ -549,7 +595,9 @@ def get_post_chat(post_id: str):
                 post_id=d.get("post_id"),
                 message=d.get("message"),
                 author=d.get("author"),
+                attachment_url=d.get("attachment_url"),
                 created_at=d.get("created_at"),
+                updated_at=d.get("updated_at"),
             )
         )
     return items
@@ -557,9 +605,47 @@ def get_post_chat(post_id: str):
 @app.post("/api/posts/{post_id}/chat", response_model=ChatMessage)
 def add_post_chat(post_id: str, body: ChatMessageCreate):
     now = datetime.now(timezone.utc)
-    data = {"post_id": post_id, "message": body.message, "author": body.author, "created_at": now, "updated_at": now}
+    data = {"post_id": post_id, "message": body.message, "author": body.author, "attachment_url": body.attachment_url, "created_at": now, "updated_at": now}
     chat_id = create_document("chat", data)
-    return ChatMessage(id=chat_id, post_id=post_id, message=body.message, author=body.author, created_at=now)
+    return ChatMessage(id=chat_id, post_id=post_id, message=body.message, author=body.author, attachment_url=body.attachment_url, created_at=now, updated_at=now)
+
+class ChatUpdate(BaseModel):
+    message: Optional[str] = None
+    attachment_url: Optional[str] = None
+
+@app.patch("/api/posts/{post_id}/chat/{message_id}", response_model=ChatMessage)
+def edit_post_chat(post_id: str, message_id: str, body: ChatUpdate):
+    doc = get_document_by_id("chat", message_id)
+    if not doc or doc.get("post_id") != post_id:
+        raise HTTPException(status_code=404, detail="Message not found")
+    changes: Dict[str, Any] = {}
+    if body.message is not None:
+        changes["message"] = body.message
+    if body.attachment_url is not None:
+        changes["attachment_url"] = body.attachment_url
+    changes["updated_at"] = datetime.now(timezone.utc)
+    update_document("chat", message_id, changes)
+    updated = get_document_by_id("chat", message_id)
+    return ChatMessage(
+        id=str(updated.get("_id")),
+        post_id=updated.get("post_id"),
+        message=updated.get("message"),
+        author=updated.get("author"),
+        attachment_url=updated.get("attachment_url"),
+        created_at=updated.get("created_at"),
+        updated_at=updated.get("updated_at"),
+    )
+
+@app.delete("/api/posts/{post_id}/chat/{message_id}")
+def delete_post_chat(post_id: str, message_id: str):
+    from bson import ObjectId
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not available")
+    doc = db["chat"].find_one({"_id": ObjectId(message_id)})
+    if not doc or doc.get("post_id") != post_id:
+        raise HTTPException(status_code=404, detail="Message not found")
+    db["chat"].delete_one({"_id": ObjectId(message_id)})
+    return {"status": "deleted"}
 
 # ===== Top Posts (aggregated page visible to all social accounts) =====
 @app.get("/api/top-posts")
@@ -580,6 +666,22 @@ def get_top_posts(limit: int = 20):
             }
         )
     return {"items": items}
+
+@app.get("/api/top-posts/{top_id}")
+def get_top_post(top_id: str):
+    doc = get_document_by_id("toppost", top_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Top post not found")
+    return {
+        "id": str(doc.get("_id")),
+        "campaign_id": doc.get("campaign_id"),
+        "title": doc.get("title"),
+        "summary": doc.get("summary"),
+        "media_url": doc.get("media_url"),
+        "destination_url": doc.get("destination_url"),
+        "platforms": doc.get("platforms", []),
+        "created_at": doc.get("created_at"),
+    }
 
 # ===================== Publish =====================
 @app.post("/api/publish", response_model=PublishResponse)
